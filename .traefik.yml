@@ -1,0 +1,11 @@
+displayName: GeoIP2 Full
+type: middleware
+
+import: github.com/Softlabs22/traefik-geoip2-full
+
+summary: >
+  Resolves the real client IP and enriches requests with full MaxMind GeoIP2 City
+  data (country, region, city, continent, EU flag, postal code, coordinates, timezone).
+
+testData:
+  dbPath: /geoip2/GeoLite2-City.mmdb
