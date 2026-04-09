@@ -4,16 +4,11 @@ export GO111MODULE=on
 
 default: test
 
-test: testdata/GeoIP2-City-Test.mmdb
+test:
 	go test -v -cover ./...
 
 yaegi_test:
 	yaegi test -v .
-
-testdata/GeoIP2-City-Test.mmdb:
-	mkdir -p testdata
-	curl -sSL -o testdata/GeoIP2-City-Test.mmdb \
-		https://github.com/maxmind/MaxMind-DB/raw/main/test-data/GeoIP2-City-Test.mmdb
 
 vendor:
 	go mod tidy

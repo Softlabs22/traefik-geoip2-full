@@ -8,4 +8,5 @@ summary: >
   data (country, region, city, continent, EU flag, postal code, coordinates, timezone).
 
 testData:
-  dbPath: /geoip2/GeoLite2-City.mmdb
+  dbPath: ./testdata/GeoIP2-City-Test.mmdb
+  realIPHeader: X-Real-Client-IP

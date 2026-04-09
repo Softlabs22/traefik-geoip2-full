@@ -26,7 +26,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/oschwald/geoip2-golang"
 )
@@ -47,7 +50,10 @@ func CreateConfig() *Config {
 type GeoIP2Full struct {
 	next         http.Handler
 	name         string
+	dbPath       string
+	dbModTime    time.Time
 	reader       *geoip2.Reader
+	mu           sync.RWMutex
 	ipHeaders    []string
 	realIPHeader string
 }
@@ -58,16 +64,53 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 		return nil, fmt.Errorf("geoip2-full: cannot open %s: %w", cfg.DBPath, err)
 	}
 
+	info, err := os.Stat(cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("geoip2-full: cannot stat %s: %w", cfg.DBPath, err)
+	}
+
 	return &GeoIP2Full{
 		next:         next,
 		name:         name,
+		dbPath:       cfg.DBPath,
+		dbModTime:    info.ModTime(),
 		reader:       reader,
 		ipHeaders:    canonical(cfg.IPHeaders),
 		realIPHeader: http.CanonicalHeaderKey(cfg.RealIPHeader),
 	}, nil
 }
 
+func (g *GeoIP2Full) reloadIfChanged() {
+	info, err := os.Stat(g.dbPath)
+	if err != nil {
+		return
+	}
+
+	g.mu.RLock()
+	unchanged := !info.ModTime().After(g.dbModTime)
+	g.mu.RUnlock()
+
+	if unchanged {
+		return
+	}
+
+	r, err := geoip2.Open(g.dbPath)
+	if err != nil {
+		return
+	}
+
+	g.mu.Lock()
+	old := g.reader
+	g.reader = r
+	g.dbModTime = info.ModTime()
+	g.mu.Unlock()
+
+	old.Close()
+}
+
 func (g *GeoIP2Full) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	g.reloadIfChanged()
+
 	ip := g.resolveIP(req)
 	req.Header.Set(g.realIPHeader, ip)
 	g.enrich(req, ip)
@@ -100,7 +143,10 @@ func (g *GeoIP2Full) enrich(req *http.Request, rawIP string) {
 		return
 	}
 
+	g.mu.RLock()
 	record, err := g.reader.City(ip)
+	g.mu.RUnlock()
+
 	if err != nil {
 		return
 	}

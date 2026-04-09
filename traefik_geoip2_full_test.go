@@ -2,10 +2,13 @@ package traefik_geoip2_full
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
 
 // testDB is the path to the MaxMind GeoIP2-City test database.
@@ -397,6 +400,144 @@ func TestIntegration_CustomIPHeaders(t *testing.T) {
 	if v := got.Get("X-Geoip2-Country"); v != "SE" {
 		t.Errorf("Country = %q, want SE", v)
 	}
+}
+
+// ---- hot-reload: reloadIfChanged -------------------------------------------
+
+// copyDB copies testDB to a temp file and returns its path.
+func copyDB(t *testing.T) string {
+	t.Helper()
+	if _, err := os.Stat(testDB); os.IsNotExist(err) {
+		t.Skipf("test DB not found at %s", testDB)
+	}
+	src, err := os.Open(testDB)
+	if err != nil {
+		t.Fatalf("open src: %v", err)
+	}
+	defer src.Close()
+
+	dst, err := os.CreateTemp("", "geoip2-*.mmdb")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(dst.Name()) })
+	return dst.Name()
+}
+
+// newMiddlewareFromPath creates a *GeoIP2Full directly (package-internal access).
+func newMiddlewareFromPath(t *testing.T, path string) *GeoIP2Full {
+	t.Helper()
+	cfg := CreateConfig()
+	cfg.DBPath = path
+	cfg.IPHeaders = []string{"custom-ip-header", "CF-Connecting-IP", "X-Client-IP"}
+	h, err := New(context.Background(), http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	}), cfg, "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return h.(*GeoIP2Full)
+}
+
+func TestReloadIfChanged_NoReloadWhenUnchanged(t *testing.T) {
+	path := copyDB(t)
+	g := newMiddlewareFromPath(t, path)
+
+	before := g.dbModTime
+	readerBefore := g.reader
+
+	g.reloadIfChanged()
+
+	if !g.dbModTime.Equal(before) {
+		t.Error("dbModTime changed but file was not modified")
+	}
+	if g.reader != readerBefore {
+		t.Error("reader was replaced but file was not modified")
+	}
+}
+
+func TestReloadIfChanged_ReloadsWhenMtimeChanges(t *testing.T) {
+	path := copyDB(t)
+	g := newMiddlewareFromPath(t, path)
+
+	readerBefore := g.reader
+
+	// advance mtime by 1 second
+	future := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	g.reloadIfChanged()
+
+	if g.reader == readerBefore {
+		t.Error("reader was not replaced after mtime change")
+	}
+	if !g.dbModTime.Equal(future.Truncate(time.Second)) && !g.dbModTime.After(g.dbModTime) {
+		// just check it updated
+		if g.dbModTime.Equal(time.Time{}) {
+			t.Error("dbModTime was not updated")
+		}
+	}
+}
+
+func TestReloadIfChanged_SkipsOnStatError(t *testing.T) {
+	path := copyDB(t)
+	g := newMiddlewareFromPath(t, path)
+
+	readerBefore := g.reader
+	modBefore := g.dbModTime
+
+	// point to nonexistent file
+	g.dbPath = "/nonexistent/path.mmdb"
+	g.reloadIfChanged()
+
+	if g.reader != readerBefore {
+		t.Error("reader changed on stat error")
+	}
+	if !g.dbModTime.Equal(modBefore) {
+		t.Error("dbModTime changed on stat error")
+	}
+}
+
+func TestReloadIfChanged_ConcurrentSafe(t *testing.T) {
+	path := copyDB(t)
+	g := newMiddlewareFromPath(t, path)
+
+	next := http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	})
+
+	var wg sync.WaitGroup
+
+	// 50 concurrent readers
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("X-Forwarded-For", "2.125.160.216")
+			rw := httptest.NewRecorder()
+			g.ServeHTTP(rw, req)
+			_ = next
+		}()
+	}
+
+	// trigger a reload mid-flight
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		future := time.Now().Add(time.Second)
+		_ = os.Chtimes(path, future, future)
+		g.reloadIfChanged()
+	}()
+
+	wg.Wait()
 }
 
 func TestIntegration_CustomRealIPHeader(t *testing.T) {

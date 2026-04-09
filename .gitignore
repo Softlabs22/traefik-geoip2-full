@@ -9,7 +9,4 @@
 *.test
 *.out
 
-# Test databases — download with: make testdata
-testdata/*.mmdb
-
 # vendor/ is intentionally committed (required for Traefik plugins)
