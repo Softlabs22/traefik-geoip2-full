@@ -6,11 +6,9 @@ A Traefik middleware plugin that resolves the real client IP and enriches reques
 
 The plugin resolves the client IP in the following order:
 
-1. `partner-ip` — explicit partner API override
-2. `CF-Connecting-IP` — Cloudflare edge header
-3. `X-Client-IP` — standard client IP header
-4. `X-Forwarded-For` — first entry in the proxy chain
-5. `RemoteAddr` — direct TCP connection
+1. Headers listed in `ipHeaders` (checked in order, configured via values), e.g. `CF-Connecting-IP`, `X-Client-IP`
+2. `X-Forwarded-For` — first entry in the proxy chain
+3. `RemoteAddr` — direct TCP connection
 
 ## Output Headers
 
@@ -43,7 +41,7 @@ experimental:
   plugins:
     geoip2-full:
       moduleName: github.com/Softlabs22/traefik-geoip2-full
-      version: v1.0.0
+      version: v0.0.1
 ```
 
 ### Dynamic configuration
@@ -55,19 +53,6 @@ http:
       plugin:
         geoip2-full:
           dbPath: /geoip2/GeoLite2-City.mmdb
-```
-
-### Docker example
-
-```yaml
-services:
-  traefik:
-    image: traefik:v3
-    volumes:
-      - ./traefik.yml:/etc/traefik/traefik.yml
-      - ./geoip2:/geoip2
-    labels:
-      - "traefik.http.middlewares.my-geoip2.plugin.geoip2-full.dbPath=/geoip2/GeoLite2-City.mmdb"
 ```
 
 ## Configuration
@@ -89,10 +74,6 @@ http:
           dbPath: /geoip2/GeoLite2-City.mmdb
           ipHeaders:
             - CF-Connecting-IP
-            - X-Forwarded-For
+            - X-Client-IP
           realIPHeader: X-Real-IP
 ```
-
-## License
-
-MIT
