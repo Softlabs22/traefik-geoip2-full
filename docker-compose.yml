@@ -1,0 +1,26 @@
+services:
+  traefik:
+    image: traefik:v3.5.3
+    ports:
+      - "80:80"
+      - "8080:8080"   # dashboard: http://localhost:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/traefik.yml:/etc/traefik/traefik.yml:ro
+      # plugin source — must match moduleName in traefik.yml
+      - .:/plugins-local/src/github.com/Softlabs22/traefik-geoip2-full:ro
+      # GeoIP2 database — override GEOIP_DB_DIR to point to your mmdb directory
+      - ${GEOIP_DB_DIR:-./testdata}:/geoip2:ro
+
+  whoami:
+    image: traefik/whoami
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.whoami.rule=PathPrefix(`/`)
+      - traefik.http.routers.whoami.entrypoints=web
+      - traefik.http.routers.whoami.middlewares=geoip2
+      - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.dbPath=/geoip2/${GEOIP_DB_FILE:-GeoIP2-City-Test.mmdb}
+      - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.ipHeaders[0]=custom-ip-header
+      - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.ipHeaders[1]=CF-Connecting-IP
+      - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.ipHeaders[2]=X-Client-IP
+      - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.realIPHeader=X-Real-Client-IP

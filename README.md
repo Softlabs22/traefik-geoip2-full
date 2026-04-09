@@ -27,6 +27,60 @@ The plugin resolves the client IP in the following order:
 
 The resolved IP is also written to `X-Real-Client-IP` (configurable).
 
+## Local development
+
+### Prerequisites
+
+- Docker + Docker Compose
+- A MaxMind `.mmdb` database file (see [Requirements](#requirements) below)
+
+### Run with test database
+
+The repo includes a small MaxMind test database sufficient for verifying the plugin
+works end-to-end (covers a handful of known IPs, e.g. `81.2.69.142` → GB/London).
+
+```bash
+# download test database (once)
+make testdata/GeoIP2-City-Test.mmdb
+
+# start Traefik + whoami backend
+docker compose up
+```
+
+Open the Traefik dashboard: http://localhost:8080
+
+### Run with real GeoLite2 database
+
+```bash
+GEOIP_DB_DIR=/path/to/your/geoip2 \
+GEOIP_DB_FILE=GeoLite2-City.mmdb \
+docker compose up
+```
+
+### Verify the plugin
+
+```bash
+# CF-Connecting-IP header — should return X-GeoIP2-Country: GB
+curl -s http://localhost/ -H "CF-Connecting-IP: 81.2.69.142" | grep -i geoip
+
+# custom-ip-header has highest priority
+curl -s http://localhost/ \
+  -H "custom-ip-header: 81.2.69.142" \
+  -H "CF-Connecting-IP: 1.2.3.4" | grep -i geoip
+
+# unknown IP — GeoIP2 headers should be absent, X-Real-Client-IP still set
+curl -s http://localhost/ -H "CF-Connecting-IP: 192.0.2.1" | grep -i "x-real\|geoip"
+```
+
+The `whoami` backend echoes all incoming request headers in the response body,
+so every `X-GeoIP2-*` header injected by the plugin will be visible there.
+
+### Run unit tests
+
+```bash
+make test
+```
+
 ## Requirements
 
 A MaxMind GeoIP2 or GeoLite2 City database file (`.mmdb`). You can download [GeoLite2-City](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) for free after creating a MaxMind account.

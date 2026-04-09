@@ -1,0 +1,19 @@
+log:
+  level: DEBUG
+
+api:
+  dashboard: true
+  insecure: true
+
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  docker:
+    exposedByDefault: false
+
+experimental:
+  localPlugins:
+    traefik-geoip2-full:
+      moduleName: github.com/Softlabs22/traefik-geoip2-full

@@ -21,7 +21,7 @@ func newTestMiddleware(t *testing.T) http.Handler {
 	}
 	cfg := CreateConfig()
 	cfg.DBPath = testDB
-	cfg.IPHeaders = []string{"partner-ip", "CF-Connecting-IP", "X-Client-IP"}
+	cfg.IPHeaders = []string{"custom-ip-header", "CF-Connecting-IP", "X-Client-IP"}
 	h, err := New(context.Background(), http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
 	}), cfg, "test")
@@ -63,7 +63,7 @@ func TestCanonical(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"partner-ip", "Partner-Ip"},
+		{"custom-ip-header", "Custom-Ip-Header"},
 		{"CF-Connecting-IP", "Cf-Connecting-Ip"},
 		{"X-Client-IP", "X-Client-Ip"},
 		{"x-forwarded-for", "X-Forwarded-For"},
@@ -80,7 +80,7 @@ func TestCanonical(t *testing.T) {
 
 func newUnitHandler() *GeoIP2Full {
 	return &GeoIP2Full{
-		ipHeaders:    canonical([]string{"partner-ip", "CF-Connecting-IP", "X-Client-IP"}),
+		ipHeaders:    canonical([]string{"custom-ip-header", "CF-Connecting-IP", "X-Client-IP"}),
 		realIPHeader: http.CanonicalHeaderKey("X-Real-Client-IP"),
 	}
 }
@@ -88,7 +88,7 @@ func newUnitHandler() *GeoIP2Full {
 func TestResolveIP_PartnerIPWins(t *testing.T) {
 	g := newUnitHandler()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Partner-Ip", "10.0.0.1")
+	req.Header.Set("Custom-Ip-Header", "10.0.0.1")
 	req.Header.Set("Cf-Connecting-Ip", "10.0.0.2")
 	req.Header.Set("X-Forwarded-For", "10.0.0.3")
 
@@ -142,7 +142,7 @@ func TestResolveIP_RemoteAddr(t *testing.T) {
 func TestResolveIP_SkipsEmptyHeaders(t *testing.T) {
 	g := newUnitHandler()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Partner-Ip", "   ")
+	req.Header.Set("Custom-Ip-Header", "   ")
 	req.Header.Set("Cf-Connecting-Ip", "")
 	req.Header.Set("X-Forwarded-For", "10.1.2.3")
 
@@ -346,13 +346,13 @@ func TestIntegration_UnknownIP_NoGeoHeaders(t *testing.T) {
 func TestIntegration_PartnerIPOverridesXFF(t *testing.T) {
 	h := newTestMiddleware(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Partner-Ip", "89.160.20.112")      // SE
-	req.Header.Set("X-Forwarded-For", "216.160.83.56") // US
+	req.Header.Set("Custom-Ip-Header", "89.160.20.112") // SE
+	req.Header.Set("X-Forwarded-For", "216.160.83.56")  // US
 	got := serveAndHeaders(t, h, req)
 
-	// partner-ip wins → SE
+	// custom-ip-header wins → SE
 	if v := got.Get("X-Geoip2-Country"); v != "SE" {
-		t.Errorf("Country = %q, want SE (partner-ip should win)", v)
+		t.Errorf("Country = %q, want SE (custom-ip-header should win)", v)
 	}
 	if v := got.Get("X-Real-Client-Ip"); v != "89.160.20.112" {
 		t.Errorf("X-Real-Client-IP = %q, want 89.160.20.112", v)
