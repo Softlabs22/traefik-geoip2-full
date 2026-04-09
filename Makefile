@@ -71,6 +71,8 @@ vendor-patch:
 		'# github.com/oschwald/maxminddb-golang v1.13.0' \
 		'## explicit; go 1.21' \
 		'github.com/oschwald/maxminddb-golang' \
+		'# golang.org/x/sys v0.20.0' \
+		'## explicit; go 1.18' \
 		> vendor/modules.txt
 	@echo "Done."
 
