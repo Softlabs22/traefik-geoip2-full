@@ -29,10 +29,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
 )
+
+const reloadCheckInterval = 30 * time.Second
 
 type Config struct {
 	DBPath       string   `json:"dbPath"`
@@ -52,8 +55,10 @@ type GeoIP2Full struct {
 	name         string
 	dbPath       string
 	dbModTime    time.Time
+	lastCheck    time.Time
 	reader       *geoip2.Reader
 	mu           sync.RWMutex
+	reloading    atomic.Bool
 	ipHeaders    []string
 	realIPHeader string
 }
@@ -74,21 +79,39 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 		name:         name,
 		dbPath:       cfg.DBPath,
 		dbModTime:    info.ModTime(),
+		lastCheck:    time.Now(),
 		reader:       reader,
 		ipHeaders:    canonical(cfg.IPHeaders),
 		realIPHeader: http.CanonicalHeaderKey(cfg.RealIPHeader),
 	}, nil
 }
 
+// reloadIfChanged checks at most once per reloadCheckInterval whether the DB
+// file has been replaced, and reloads it if so. Only one reload runs at a time.
 func (g *GeoIP2Full) reloadIfChanged() {
+	g.mu.RLock()
+	due := time.Since(g.lastCheck) >= reloadCheckInterval
+	g.mu.RUnlock()
+
+	if !due {
+		return
+	}
+
+	// Only one goroutine performs the reload; others skip.
+	if !g.reloading.CompareAndSwap(false, true) {
+		return
+	}
+	defer g.reloading.Store(false)
+
 	info, err := os.Stat(g.dbPath)
 	if err != nil {
 		return
 	}
 
-	g.mu.RLock()
+	g.mu.Lock()
+	g.lastCheck = time.Now()
 	unchanged := !info.ModTime().After(g.dbModTime)
-	g.mu.RUnlock()
+	g.mu.Unlock()
 
 	if unchanged {
 		return
