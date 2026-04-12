@@ -50,89 +50,122 @@ func CreateConfig() *Config {
 	}
 }
 
-type GeoIP2Full struct {
-	next         http.Handler
-	name         string
-	dbPath       string
-	dbModTime    time.Time
-	lastCheck    time.Time
-	reader       *geoip2.Reader
-	mu           sync.RWMutex
-	reloading    atomic.Bool
-	ipHeaders    []string
-	realIPHeader string
+// sharedDB holds a single GeoIP2 reader shared across all plugin instances
+// that reference the same database file path. Traefik calls New() once per
+// router, so without sharing each instance would load its own copy of the DB.
+type sharedDB struct {
+	path      string
+	mu        sync.RWMutex
+	reader    *geoip2.Reader
+	modTime   time.Time
+	lastCheck time.Time
+	reloading atomic.Bool
 }
 
-func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.Handler, error) {
-	reader, err := geoip2.Open(cfg.DBPath)
-	if err != nil {
-		return nil, fmt.Errorf("geoip2-full: cannot open %s: %w", cfg.DBPath, err)
+var (
+	dbsMu sync.Mutex
+	dbs   = map[string]*sharedDB{}
+)
+
+// getOrOpenDB returns the cached sharedDB for path, opening and caching it on first call.
+func getOrOpenDB(path string) (*sharedDB, error) {
+	dbsMu.Lock()
+	defer dbsMu.Unlock()
+
+	if db, ok := dbs[path]; ok {
+		return db, nil
 	}
 
-	info, err := os.Stat(cfg.DBPath)
+	reader, err := geoip2.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("geoip2-full: cannot stat %s: %w", cfg.DBPath, err)
+		return nil, fmt.Errorf("geoip2-full: cannot open %s: %w", path, err)
 	}
 
-	return &GeoIP2Full{
-		next:         next,
-		name:         name,
-		dbPath:       cfg.DBPath,
-		dbModTime:    info.ModTime(),
-		lastCheck:    time.Now(),
-		reader:       reader,
-		ipHeaders:    canonical(cfg.IPHeaders),
-		realIPHeader: http.CanonicalHeaderKey(cfg.RealIPHeader),
-	}, nil
+	info, err := os.Stat(path)
+	if err != nil {
+		reader.Close()
+		return nil, fmt.Errorf("geoip2-full: cannot stat %s: %w", path, err)
+	}
+
+	db := &sharedDB{
+		path:      path,
+		reader:    reader,
+		modTime:   info.ModTime(),
+		lastCheck: time.Now(),
+	}
+	dbs[path] = db
+	return db, nil
 }
 
 // reloadIfChanged checks at most once per reloadCheckInterval whether the DB
 // file has been replaced, and reloads it if so. Only one reload runs at a time.
-func (g *GeoIP2Full) reloadIfChanged() {
-	g.mu.RLock()
-	due := time.Since(g.lastCheck) >= reloadCheckInterval
-	g.mu.RUnlock()
+func (db *sharedDB) reloadIfChanged() {
+	db.mu.RLock()
+	due := time.Since(db.lastCheck) >= reloadCheckInterval
+	db.mu.RUnlock()
 
 	if !due {
 		return
 	}
 
-	// Only one goroutine performs the reload; others skip.
-	if !g.reloading.CompareAndSwap(false, true) {
+	if !db.reloading.CompareAndSwap(false, true) {
 		return
 	}
-	defer g.reloading.Store(false)
+	defer db.reloading.Store(false)
 
-	info, err := os.Stat(g.dbPath)
+	info, err := os.Stat(db.path)
 	if err != nil {
 		return
 	}
 
-	g.mu.Lock()
-	g.lastCheck = time.Now()
-	unchanged := !info.ModTime().After(g.dbModTime)
-	g.mu.Unlock()
+	db.mu.Lock()
+	db.lastCheck = time.Now()
+	unchanged := !info.ModTime().After(db.modTime)
+	db.mu.Unlock()
 
 	if unchanged {
 		return
 	}
 
-	r, err := geoip2.Open(g.dbPath)
+	r, err := geoip2.Open(db.path)
 	if err != nil {
 		return
 	}
 
-	g.mu.Lock()
-	old := g.reader
-	g.reader = r
-	g.dbModTime = info.ModTime()
-	g.mu.Unlock()
+	db.mu.Lock()
+	old := db.reader
+	db.reader = r
+	db.modTime = info.ModTime()
+	db.mu.Unlock()
 
 	old.Close()
 }
 
+type GeoIP2Full struct {
+	next         http.Handler
+	name         string
+	db           *sharedDB
+	ipHeaders    []string
+	realIPHeader string
+}
+
+func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.Handler, error) {
+	db, err := getOrOpenDB(cfg.DBPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &GeoIP2Full{
+		next:         next,
+		name:         name,
+		db:           db,
+		ipHeaders:    canonical(cfg.IPHeaders),
+		realIPHeader: http.CanonicalHeaderKey(cfg.RealIPHeader),
+	}, nil
+}
+
 func (g *GeoIP2Full) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	g.reloadIfChanged()
+	g.db.reloadIfChanged()
 
 	ip := g.resolveIP(req)
 	req.Header.Set(g.realIPHeader, ip)
@@ -166,9 +199,9 @@ func (g *GeoIP2Full) enrich(req *http.Request, rawIP string) {
 		return
 	}
 
-	g.mu.RLock()
-	record, err := g.reader.City(ip)
-	g.mu.RUnlock()
+	g.db.mu.RLock()
+	record, err := g.db.reader.City(ip)
+	g.db.mu.RUnlock()
 
 	if err != nil {
 		return

@@ -430,6 +430,7 @@ func copyDB(t *testing.T) string {
 }
 
 // newMiddlewareFromPath creates a *GeoIP2Full directly (package-internal access).
+// Each call uses a unique path (from copyDB) so getOrOpenDB always creates a new sharedDB.
 func newMiddlewareFromPath(t *testing.T, path string) *GeoIP2Full {
 	t.Helper()
 	cfg := CreateConfig()
@@ -444,19 +445,28 @@ func newMiddlewareFromPath(t *testing.T, path string) *GeoIP2Full {
 	return h.(*GeoIP2Full)
 }
 
+// forceReloadDue resets lastCheck so the next reloadIfChanged call treats the
+// interval as elapsed and proceeds to stat the file.
+func forceReloadDue(db *sharedDB) {
+	db.mu.Lock()
+	db.lastCheck = time.Time{}
+	db.mu.Unlock()
+}
+
 func TestReloadIfChanged_NoReloadWhenUnchanged(t *testing.T) {
 	path := copyDB(t)
 	g := newMiddlewareFromPath(t, path)
 
-	before := g.dbModTime
-	readerBefore := g.reader
+	forceReloadDue(g.db)
+	before := g.db.modTime
+	readerBefore := g.db.reader
 
-	g.reloadIfChanged()
+	g.db.reloadIfChanged()
 
-	if !g.dbModTime.Equal(before) {
-		t.Error("dbModTime changed but file was not modified")
+	if !g.db.modTime.Equal(before) {
+		t.Error("modTime changed but file was not modified")
 	}
-	if g.reader != readerBefore {
+	if g.db.reader != readerBefore {
 		t.Error("reader was replaced but file was not modified")
 	}
 }
@@ -465,24 +475,21 @@ func TestReloadIfChanged_ReloadsWhenMtimeChanges(t *testing.T) {
 	path := copyDB(t)
 	g := newMiddlewareFromPath(t, path)
 
-	readerBefore := g.reader
+	readerBefore := g.db.reader
 
-	// advance mtime by 1 second
 	future := time.Now().Add(time.Second)
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	g.reloadIfChanged()
+	forceReloadDue(g.db)
+	g.db.reloadIfChanged()
 
-	if g.reader == readerBefore {
+	if g.db.reader == readerBefore {
 		t.Error("reader was not replaced after mtime change")
 	}
-	if !g.dbModTime.Equal(future.Truncate(time.Second)) && !g.dbModTime.After(g.dbModTime) {
-		// just check it updated
-		if g.dbModTime.Equal(time.Time{}) {
-			t.Error("dbModTime was not updated")
-		}
+	if g.db.modTime.Equal(time.Time{}) {
+		t.Error("modTime was not updated")
 	}
 }
 
@@ -490,28 +497,24 @@ func TestReloadIfChanged_SkipsOnStatError(t *testing.T) {
 	path := copyDB(t)
 	g := newMiddlewareFromPath(t, path)
 
-	readerBefore := g.reader
-	modBefore := g.dbModTime
+	readerBefore := g.db.reader
+	modBefore := g.db.modTime
 
-	// point to nonexistent file
-	g.dbPath = "/nonexistent/path.mmdb"
-	g.reloadIfChanged()
+	g.db.path = "/nonexistent/path.mmdb"
+	forceReloadDue(g.db)
+	g.db.reloadIfChanged()
 
-	if g.reader != readerBefore {
+	if g.db.reader != readerBefore {
 		t.Error("reader changed on stat error")
 	}
-	if !g.dbModTime.Equal(modBefore) {
-		t.Error("dbModTime changed on stat error")
+	if !g.db.modTime.Equal(modBefore) {
+		t.Error("modTime changed on stat error")
 	}
 }
 
 func TestReloadIfChanged_ConcurrentSafe(t *testing.T) {
 	path := copyDB(t)
 	g := newMiddlewareFromPath(t, path)
-
-	next := http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-	})
 
 	var wg sync.WaitGroup
 
@@ -524,7 +527,6 @@ func TestReloadIfChanged_ConcurrentSafe(t *testing.T) {
 			req.Header.Set("X-Forwarded-For", "2.125.160.216")
 			rw := httptest.NewRecorder()
 			g.ServeHTTP(rw, req)
-			_ = next
 		}()
 	}
 
@@ -534,7 +536,8 @@ func TestReloadIfChanged_ConcurrentSafe(t *testing.T) {
 		defer wg.Done()
 		future := time.Now().Add(time.Second)
 		_ = os.Chtimes(path, future, future)
-		g.reloadIfChanged()
+		forceReloadDue(g.db)
+		g.db.reloadIfChanged()
 	}()
 
 	wg.Wait()
