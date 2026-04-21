@@ -1,6 +1,6 @@
 services:
   traefik:
-    image: traefik:v3.5.3
+    image: traefik:v3.6.4
     ports:
       - "80:80"
       - "8080:8080"   # dashboard: http://localhost:8080
@@ -24,3 +24,5 @@ services:
       - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.ipHeaders[1]=CF-Connecting-IP
       - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.ipHeaders[2]=X-Client-IP
       - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.realIPHeader=X-Real-Client-IP
+      - traefik.http.middlewares.geoip2.plugin.traefik-geoip2-full.debug=true
+

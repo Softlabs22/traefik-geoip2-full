@@ -95,7 +95,14 @@ experimental:
   plugins:
     geoip2-full:
       moduleName: github.com/Softlabs22/traefik-geoip2-full
-      version: v0.0.1
+      version: v0.0.3
+```
+
+Or via CLI args (e.g. Kubernetes deployment patch):
+
+```
+--experimental.plugins.geoip2-full.moduleName=github.com/Softlabs22/traefik-geoip2-full
+--experimental.plugins.geoip2-full.version=v0.0.3
 ```
 
 ### Dynamic configuration
@@ -131,3 +138,11 @@ http:
             - X-Client-IP
           realIPHeader: X-Real-IP
 ```
+
+## Hot-reload
+
+The plugin checks the database file's modification time every 30 seconds. If the file has been replaced, it reloads the reader without restarting Traefik. Only one reload runs at a time regardless of traffic volume.
+
+## Memory
+
+Traefik calls `New()` once per router that references the middleware, not once per `Middleware` resource. All instances sharing the same `dbPath` use a single in-memory reader (~62 MB for GeoLite2-City), so memory usage does not grow with the number of routers.

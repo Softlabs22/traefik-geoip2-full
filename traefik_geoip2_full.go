@@ -24,6 +24,7 @@ package traefik_geoip2_full
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -39,6 +40,7 @@ const reloadCheckInterval = 30 * time.Second
 
 type Config struct {
 	DBPath       string   `json:"dbPath"`
+	Debug        bool     `json:"debug,omitempty"`
 	IPHeaders    []string `json:"ipHeaders,omitempty"`
 	RealIPHeader string   `json:"realIPHeader,omitempty"`
 }
@@ -145,8 +147,14 @@ type GeoIP2Full struct {
 	next         http.Handler
 	name         string
 	db           *sharedDB
+	debug        bool
 	ipHeaders    []string
 	realIPHeader string
+}
+
+type ipResolution struct {
+	IP     string
+	Source string
 }
 
 func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.Handler, error) {
@@ -159,6 +167,7 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 		next:         next,
 		name:         name,
 		db:           db,
+		debug:        cfg.Debug,
 		ipHeaders:    canonical(cfg.IPHeaders),
 		realIPHeader: http.CanonicalHeaderKey(cfg.RealIPHeader),
 	}, nil
@@ -167,30 +176,31 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 func (g *GeoIP2Full) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	g.db.reloadIfChanged()
 
-	ip := g.resolveIP(req)
-	req.Header.Set(g.realIPHeader, ip)
-	g.enrich(req, ip)
+	resolution := g.resolveIP(req)
+	req.Header.Set(g.realIPHeader, resolution.IP)
+	g.enrich(req, resolution.IP)
+	g.logDebug(req, resolution)
 	g.next.ServeHTTP(rw, req)
 }
 
-func (g *GeoIP2Full) resolveIP(req *http.Request) string {
+func (g *GeoIP2Full) resolveIP(req *http.Request) ipResolution {
 	for _, h := range g.ipHeaders {
 		if v := strings.TrimSpace(req.Header.Get(h)); v != "" {
-			return v
+			return ipResolution{IP: v, Source: h}
 		}
 	}
 
 	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
 		if first := strings.TrimSpace(strings.SplitN(xff, ",", 2)[0]); first != "" {
-			return first
+			return ipResolution{IP: first, Source: "X-Forwarded-For"}
 		}
 	}
 
 	host, _, err := net.SplitHostPort(req.RemoteAddr)
 	if err == nil {
-		return host
+		return ipResolution{IP: host, Source: "RemoteAddr"}
 	}
-	return req.RemoteAddr
+	return ipResolution{IP: req.RemoteAddr, Source: "RemoteAddr"}
 }
 
 func (g *GeoIP2Full) enrich(req *http.Request, rawIP string) {
@@ -240,6 +250,59 @@ func (g *GeoIP2Full) enrich(req *http.Request, rawIP string) {
 	if record.Location.Longitude != 0 {
 		req.Header.Set("X-GeoIP2-Longitude", fmt.Sprintf("%f", record.Location.Longitude))
 	}
+}
+
+func (g *GeoIP2Full) logDebug(req *http.Request, resolution ipResolution) {
+	if !g.debug {
+		return
+	}
+
+	log.Printf(
+		"geoip2-full middleware=%q method=%s host=%q uri=%q remote_addr=%q ip_source=%q resolved_ip=%q candidates=[%s] emitted=[%s]",
+		g.name,
+		req.Method,
+		req.Host,
+		req.URL.RequestURI(),
+		req.RemoteAddr,
+		resolution.Source,
+		resolution.IP,
+		strings.Join(g.debugCandidates(req), ", "),
+		strings.Join(g.debugEmitted(req), ", "),
+	)
+}
+
+func (g *GeoIP2Full) debugCandidates(req *http.Request) []string {
+	parts := make([]string, 0, len(g.ipHeaders)+2)
+	for _, h := range g.ipHeaders {
+		parts = append(parts, fmt.Sprintf("%s=%q", h, req.Header.Get(h)))
+	}
+	parts = append(parts, fmt.Sprintf("X-Forwarded-For=%q", req.Header.Get("X-Forwarded-For")))
+	parts = append(parts, fmt.Sprintf("RemoteAddr=%q", req.RemoteAddr))
+	return parts
+}
+
+func (g *GeoIP2Full) debugEmitted(req *http.Request) []string {
+	headers := []string{
+		g.realIPHeader,
+		"X-GeoIP2-IPAddress",
+		"X-GeoIP2-Country",
+		"X-GeoIP2-Region",
+		"X-GeoIP2-City",
+		"X-GeoIP2-Continent",
+		"X-GeoIP2-InEU",
+		"X-GeoIP2-Postal",
+		"X-GeoIP2-Timezone",
+		"X-GeoIP2-Latitude",
+		"X-GeoIP2-Longitude",
+	}
+
+	parts := make([]string, 0, len(headers))
+	for _, h := range headers {
+		if v := req.Header.Get(h); v != "" {
+			parts = append(parts, fmt.Sprintf("%s=%q", h, v))
+		}
+	}
+	return parts
 }
 
 func canonical(headers []string) []string {

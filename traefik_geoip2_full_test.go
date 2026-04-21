@@ -1,11 +1,14 @@
 package traefik_geoip2_full
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -95,7 +98,7 @@ func TestResolveIP_PartnerIPWins(t *testing.T) {
 	req.Header.Set("Cf-Connecting-Ip", "10.0.0.2")
 	req.Header.Set("X-Forwarded-For", "10.0.0.3")
 
-	if got := g.resolveIP(req); got != "10.0.0.1" {
+	if got := g.resolveIP(req); got.IP != "10.0.0.1" {
 		t.Errorf("got %q, want 10.0.0.1", got)
 	}
 }
@@ -106,7 +109,7 @@ func TestResolveIP_CFConnectingIP(t *testing.T) {
 	req.Header.Set("Cf-Connecting-Ip", "10.0.0.2")
 	req.Header.Set("X-Forwarded-For", "10.0.0.3")
 
-	if got := g.resolveIP(req); got != "10.0.0.2" {
+	if got := g.resolveIP(req); got.IP != "10.0.0.2" {
 		t.Errorf("got %q, want 10.0.0.2", got)
 	}
 }
@@ -117,7 +120,7 @@ func TestResolveIP_XClientIP(t *testing.T) {
 	req.Header.Set("X-Client-Ip", "10.0.0.3")
 	req.Header.Set("X-Forwarded-For", "10.0.0.4, 10.0.0.5")
 
-	if got := g.resolveIP(req); got != "10.0.0.3" {
+	if got := g.resolveIP(req); got.IP != "10.0.0.3" {
 		t.Errorf("got %q, want 10.0.0.3", got)
 	}
 }
@@ -127,7 +130,7 @@ func TestResolveIP_XForwardedFor_FirstOnly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Forwarded-For", "  10.0.0.4  ,  10.0.0.5  ,  10.0.0.6")
 
-	if got := g.resolveIP(req); got != "10.0.0.4" {
+	if got := g.resolveIP(req); got.IP != "10.0.0.4" {
 		t.Errorf("got %q, want 10.0.0.4", got)
 	}
 }
@@ -137,7 +140,7 @@ func TestResolveIP_RemoteAddr(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "192.168.1.100:54321"
 
-	if got := g.resolveIP(req); got != "192.168.1.100" {
+	if got := g.resolveIP(req); got.IP != "192.168.1.100" {
 		t.Errorf("got %q, want 192.168.1.100", got)
 	}
 }
@@ -149,8 +152,59 @@ func TestResolveIP_SkipsEmptyHeaders(t *testing.T) {
 	req.Header.Set("Cf-Connecting-Ip", "")
 	req.Header.Set("X-Forwarded-For", "10.1.2.3")
 
-	if got := g.resolveIP(req); got != "10.1.2.3" {
+	if got := g.resolveIP(req); got.IP != "10.1.2.3" {
 		t.Errorf("got %q, want 10.1.2.3", got)
+	}
+}
+
+func TestServeHTTP_DebugLogsHeaders(t *testing.T) {
+	if _, err := os.Stat(testDB); os.IsNotExist(err) {
+		t.Skipf("test DB not found at %s", testDB)
+	}
+
+	cfg := CreateConfig()
+	cfg.DBPath = testDB
+	cfg.Debug = true
+	cfg.IPHeaders = []string{"custom-ip-header", "CF-Connecting-IP", "X-Client-IP"}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	}), cfg, "debug-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data/get-countries?_trlang=en", nil)
+	req.Host = "platform.staging.spinid.com"
+	req.RemoteAddr = "2a05:d014:b3b:c805:bb2b::4:443"
+	req.Header.Set("Cf-Connecting-Ip", "80.232.193.226")
+	req.Header.Set("X-Forwarded-For", "2a05:d014:b3b:c808:77d8:95aa:2467:f556")
+
+	serveAndHeaders(t, h, req)
+
+	out := buf.String()
+	for _, want := range []string{
+		`middleware="debug-test"`,
+		`ip_source="Cf-Connecting-Ip"`,
+		`resolved_ip="80.232.193.226"`,
+		`Cf-Connecting-Ip="80.232.193.226"`,
+		`X-Forwarded-For="2a05:d014:b3b:c808:77d8:95aa:2467:f556"`,
+		`X-Real-Client-Ip="80.232.193.226"`,
+		`X-GeoIP2-InEU="false"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("debug log missing %q in %q", want, out)
+		}
 	}
 }
 
