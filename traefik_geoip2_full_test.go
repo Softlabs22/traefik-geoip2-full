@@ -245,6 +245,7 @@ func TestIntegration_GB_Boxford_AllHeaders(t *testing.T) {
 		{"X-Geoip2-Ipaddress", "2.125.160.216"},
 		{"X-Geoip2-Country", "GB"},
 		{"X-Geoip2-Region", "ENG"},
+		{"X-Geoip2-Regionname", "England"},
 		{"X-Geoip2-City", "Boxford"},
 		{"X-Geoip2-Continent", "EU"},
 		{"X-Geoip2-Ineu", "false"},
@@ -321,6 +322,9 @@ func TestIntegration_US_Milton(t *testing.T) {
 	if v := got.Get("X-Geoip2-Region"); v != "WA" {
 		t.Errorf("Region = %q, want WA", v)
 	}
+	if v := got.Get("X-Geoip2-Regionname"); v != "Washington" {
+		t.Errorf("RegionName = %q, want Washington", v)
+	}
 	if v := got.Get("X-Geoip2-City"); v != "Milton" {
 		t.Errorf("City = %q, want Milton", v)
 	}
@@ -391,7 +395,7 @@ func TestIntegration_UnknownIP_NoGeoHeaders(t *testing.T) {
 	if v := got.Get("X-Real-Client-Ip"); v != "128.101.101.101" {
 		t.Errorf("X-Real-Client-IP = %q, want 128.101.101.101", v)
 	}
-	for _, h := range []string{"X-Geoip2-Country", "X-Geoip2-City", "X-Geoip2-Region"} {
+	for _, h := range []string{"X-Geoip2-Country", "X-Geoip2-City", "X-Geoip2-Region", "X-Geoip2-Regionname"} {
 		if v := got.Get(h); v != "" {
 			t.Errorf("%s = %q, want empty", h, v)
 		}

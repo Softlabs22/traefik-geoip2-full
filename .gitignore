@@ -8,5 +8,6 @@
 *.exe
 *.test
 *.out
+.gocache
 
 # vendor/ is intentionally committed (required for Traefik plugins)

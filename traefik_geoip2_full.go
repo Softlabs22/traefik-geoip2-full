@@ -226,6 +226,9 @@ func (g *GeoIP2Full) enrich(req *http.Request, rawIP string) {
 		if v := record.Subdivisions[0].IsoCode; v != "" {
 			req.Header.Set("X-GeoIP2-Region", v)
 		}
+		if v := record.Subdivisions[0].Names["en"]; v != "" {
+			req.Header.Set("X-GeoIP2-RegionName", v)
+		}
 	}
 	if v := record.City.Names["en"]; v != "" {
 		req.Header.Set("X-GeoIP2-City", v)

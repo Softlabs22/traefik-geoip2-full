@@ -17,6 +17,7 @@ The plugin resolves the client IP in the following order:
 | `X-GeoIP2-IPAddress` | Resolved client IP | `81.2.69.142` |
 | `X-GeoIP2-Country` | ISO 3166-1 alpha-2 country code | `GB` |
 | `X-GeoIP2-Region` | First subdivision ISO code | `ENG` |
+| `X-GeoIP2-RegionName` | First subdivision name (English) | `England` |
 | `X-GeoIP2-City` | City name (English) | `London` |
 | `X-GeoIP2-Continent` | Continent code | `EU` |
 | `X-GeoIP2-InEU` | EU membership flag | `false` |
