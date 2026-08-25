@@ -244,8 +244,8 @@ func TestIntegration_GB_Boxford_AllHeaders(t *testing.T) {
 		{"X-Real-Client-Ip", "2.125.160.216"},
 		{"X-Geoip2-Ipaddress", "2.125.160.216"},
 		{"X-Geoip2-Country", "GB"},
-		{"X-Geoip2-Region", "ENG"},
-		{"X-Geoip2-Regionname", "England"},
+		{"X-Geoip2-Region", "WBK"},
+		{"X-Geoip2-Regionname", "West Berkshire"},
 		{"X-Geoip2-City", "Boxford"},
 		{"X-Geoip2-Continent", "EU"},
 		{"X-Geoip2-Ineu", "false"},
@@ -263,6 +263,157 @@ func TestIntegration_GB_Boxford_AllHeaders(t *testing.T) {
 	}
 	if got.Get("X-Geoip2-Longitude") == "" {
 		t.Error("X-GeoIP2-Longitude is empty")
+	}
+}
+
+// ---- inbound header spoofing ----------------------------------------------
+
+// spoofedHeaders is what a malicious client might send in the hope that the backend trusts it.
+var spoofedHeaders = map[string]string{
+	"X-GeoIP2-IPAddress": "9.9.9.9",
+	"X-GeoIP2-Country":   "XX",
+	"X-GeoIP2-Region":    "SPOOF",
+	"X-GeoIP2-City":      "Atlantis",
+	"X-GeoIP2-Continent": "AN",
+	"X-GeoIP2-InEU":      "true",
+	"X-GeoIP2-Postal":    "00000",
+	"X-GeoIP2-Timezone":  "Antarctica/Troll",
+	"X-GeoIP2-Latitude":  "0.000000",
+	"X-GeoIP2-Longitude": "0.000000",
+}
+
+func withSpoofedHeaders(req *http.Request) *http.Request {
+	for h, v := range spoofedHeaders {
+		req.Header.Set(h, v)
+	}
+	return req
+}
+
+// An unparsable IP makes enrich() return before it writes anything, so without stripping the
+// client's own headers would reach the backend untouched.
+func TestSpoof_UnparsableIP_DropsClientHeaders(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := withSpoofedHeaders(httptest.NewRequest(http.MethodGet, "/", nil))
+	req.Header.Set("X-Forwarded-For", "definitely-not-an-ip")
+	got := serveAndHeaders(t, h, req)
+
+	for header := range spoofedHeaders {
+		if v := got.Get(header); v != "" {
+			t.Errorf("%s = %q, want empty (client value must not survive)", header, v)
+		}
+	}
+}
+
+// An IP the database does not know yields an empty record, so every individual header is skipped
+// as empty. The client's values must still be gone.
+func TestSpoof_UnknownIP_DropsClientHeaders(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := withSpoofedHeaders(httptest.NewRequest(http.MethodGet, "/", nil))
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	got := serveAndHeaders(t, h, req)
+
+	// IPAddress and InEU are written unconditionally by the middleware, so they are asserted
+	// on their own values rather than expected to be empty.
+	alwaysWritten := map[string]string{
+		"X-GeoIP2-IPAddress": "10.0.0.1",
+		"X-GeoIP2-InEU":      "false",
+	}
+	for header := range spoofedHeaders {
+		if want, ok := alwaysWritten[header]; ok {
+			if v := got.Get(header); v != want {
+				t.Errorf("%s = %q, want %q (middleware value, not the client's)", header, v, want)
+			}
+			continue
+		}
+		if v := got.Get(header); v != "" {
+			t.Errorf("%s = %q, want empty (client value must not survive)", header, v)
+		}
+	}
+}
+
+// A known IP must yield the looked-up values, not the client's.
+func TestSpoof_KnownIP_OverwritesClientHeaders(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := withSpoofedHeaders(httptest.NewRequest(http.MethodGet, "/", nil))
+	req.Header.Set("X-Forwarded-For", "2.125.160.216")
+	got := serveAndHeaders(t, h, req)
+
+	cases := []struct{ header, want string }{
+		{"X-Geoip2-Ipaddress", "2.125.160.216"},
+		{"X-Geoip2-Country", "GB"},
+		{"X-Geoip2-Region", "WBK"},
+		{"X-Geoip2-City", "Boxford"},
+		{"X-Geoip2-Continent", "EU"},
+		{"X-Geoip2-Ineu", "false"},
+		{"X-Geoip2-Timezone", "Europe/London"},
+	}
+	for _, c := range cases {
+		if v := got.Get(c.header); v != c.want {
+			t.Errorf("%s = %q, want %q", c.header, v, c.want)
+		}
+	}
+}
+
+// A record without a postal code leaves that one header unset, which is the narrowest version of
+// the leak: everything else is overwritten, so only the spoofed postal would get through.
+func TestSpoof_MissingFieldForKnownIP_DropsClientHeader(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := withSpoofedHeaders(httptest.NewRequest(http.MethodGet, "/", nil))
+	req.Header.Set("X-Forwarded-For", "81.2.69.142") // London, no postal code in the test DB
+	got := serveAndHeaders(t, h, req)
+
+	if v := got.Get("X-Geoip2-Country"); v != "GB" {
+		t.Fatalf("Country = %q, want GB — precondition for this test", v)
+	}
+	if v := got.Get("X-Geoip2-Postal"); v != "" {
+		t.Errorf("Postal = %q, want empty (this record has none, client value must not survive)", v)
+	}
+}
+
+// The resolved-IP header is Set on every request, so a client cannot dictate it either.
+func TestSpoof_RealClientIPHeaderIsOverwritten(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Real-Client-IP", "9.9.9.9")
+	req.Header.Set("X-Forwarded-For", "2.125.160.216")
+	got := serveAndHeaders(t, h, req)
+
+	if v := got.Get("X-Real-Client-Ip"); v != "2.125.160.216" {
+		t.Errorf("X-Real-Client-IP = %q, want 2.125.160.216", v)
+	}
+}
+
+// ---- subdivision level: most specific wins ---------------------------------
+
+// 2.125.160.216 carries two subdivisions, England (ENG) then West Berkshire (WBK). The most
+// specific one must be reported, to match GeoIp2\Model\City::mostSpecificSubdivision on the
+// consumer side; reporting "ENG" would put every two-level country a level off.
+func TestIntegration_Subdivision_MostSpecificWins(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-For", "2.125.160.216")
+	got := serveAndHeaders(t, h, req)
+
+	if v := got.Get("X-Geoip2-Region"); v != "WBK" {
+		t.Errorf("Region = %q, want WBK (most specific), not the country-level subdivision", v)
+	}
+	if v := got.Get("X-Geoip2-Regionname"); v != "West Berkshire" {
+		t.Errorf("RegionName = %q, want West Berkshire", v)
+	}
+}
+
+// A single-subdivision record must still report that one subdivision.
+func TestIntegration_Subdivision_SingleLevel(t *testing.T) {
+	h := newTestMiddleware(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-For", "81.2.69.142")
+	got := serveAndHeaders(t, h, req)
+
+	if v := got.Get("X-Geoip2-Region"); v != "ENG" {
+		t.Errorf("Region = %q, want ENG", v)
+	}
+	if v := got.Get("X-Geoip2-Regionname"); v != "England" {
+		t.Errorf("RegionName = %q, want England", v)
 	}
 }
 
