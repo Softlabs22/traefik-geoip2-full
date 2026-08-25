@@ -38,6 +38,25 @@ import (
 
 const reloadCheckInterval = 30 * time.Second
 
+// geoIP2Headers is every header this middleware derives from the GeoIP2 lookup. They are deleted
+// from the inbound request before enrichment, so a client cannot smuggle its own geo: enrich()
+// bails out early when the IP is unparsable or the lookup errors, and skips individual headers
+// whose value is empty -- in all of those cases a client-supplied value would otherwise survive
+// and be trusted downstream.
+var geoIP2Headers = []string{
+	"X-GeoIP2-IPAddress",
+	"X-GeoIP2-Country",
+	"X-GeoIP2-Region",
+	"X-GeoIP2-RegionName",
+	"X-GeoIP2-City",
+	"X-GeoIP2-Continent",
+	"X-GeoIP2-InEU",
+	"X-GeoIP2-Postal",
+	"X-GeoIP2-Timezone",
+	"X-GeoIP2-Latitude",
+	"X-GeoIP2-Longitude",
+}
+
 type Config struct {
 	DBPath       string   `json:"dbPath"`
 	Debug        bool     `json:"debug,omitempty"`
@@ -176,11 +195,22 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 func (g *GeoIP2Full) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	g.db.reloadIfChanged()
 
+	// Must run before enrich(), and unconditionally: this middleware is the only authority for
+	// these headers, so whatever the client sent is dropped whether or not we can replace it.
+	// g.realIPHeader needs no stripping -- it is Set on every request just below.
+	stripGeoIP2Headers(req)
+
 	resolution := g.resolveIP(req)
 	req.Header.Set(g.realIPHeader, resolution.IP)
 	g.enrich(req, resolution.IP)
 	g.logDebug(req, resolution)
 	g.next.ServeHTTP(rw, req)
+}
+
+func stripGeoIP2Headers(req *http.Request) {
+	for _, h := range geoIP2Headers {
+		req.Header.Del(h)
+	}
 }
 
 func (g *GeoIP2Full) resolveIP(req *http.Request) ipResolution {
@@ -223,10 +253,16 @@ func (g *GeoIP2Full) enrich(req *http.Request, rawIP string) {
 		req.Header.Set("X-GeoIP2-Country", v)
 	}
 	if len(record.Subdivisions) > 0 {
-		if v := record.Subdivisions[0].IsoCode; v != "" {
+		// MaxMind orders subdivisions from largest to smallest, so the last entry is the most
+		// specific one. Countries with two levels (GB, IT, ES, BR, ...) have more than one, and
+		// picking the first would report the region a level too coarse -- e.g. "ENG" instead of
+		// "WBK" for West Berkshire. The consumer resolves region codes with
+		// GeoIp2\Model\City::mostSpecificSubdivision, which is this same last entry.
+		subdivision := record.Subdivisions[len(record.Subdivisions)-1]
+		if v := subdivision.IsoCode; v != "" {
 			req.Header.Set("X-GeoIP2-Region", v)
 		}
-		if v := record.Subdivisions[0].Names["en"]; v != "" {
+		if v := subdivision.Names["en"]; v != "" {
 			req.Header.Set("X-GeoIP2-RegionName", v)
 		}
 	}
@@ -285,19 +321,7 @@ func (g *GeoIP2Full) debugCandidates(req *http.Request) []string {
 }
 
 func (g *GeoIP2Full) debugEmitted(req *http.Request) []string {
-	headers := []string{
-		g.realIPHeader,
-		"X-GeoIP2-IPAddress",
-		"X-GeoIP2-Country",
-		"X-GeoIP2-Region",
-		"X-GeoIP2-City",
-		"X-GeoIP2-Continent",
-		"X-GeoIP2-InEU",
-		"X-GeoIP2-Postal",
-		"X-GeoIP2-Timezone",
-		"X-GeoIP2-Latitude",
-		"X-GeoIP2-Longitude",
-	}
+	headers := append([]string{g.realIPHeader}, geoIP2Headers...)
 
 	parts := make([]string, 0, len(headers))
 	for _, h := range headers {
